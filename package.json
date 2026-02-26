@@ -1,0 +1,17 @@
+{
+  "name": "line-notion-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^9.3.0",
+    "@notionhq/client": "^2.2.15",
+    "@anthropic-ai/sdk": "^0.39.0",
+    "express": "^4.18.2",
+    "dotenv": "^16.3.1",
+    "axios": "^1.6.0"
+  }
+}
