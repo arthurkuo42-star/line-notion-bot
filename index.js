@@ -86,9 +86,12 @@ async function handleEvent(event) {
 
   // ── 圖片訊息 ──────────────────────────────────────
   if (message.type === "image") {
-    const response = await blobClient.getMessageContent(message.id);
-    const arrayBuffer = await response.arrayBuffer();
-    const imageBuffer = Buffer.from(arrayBuffer);
+const stream = await blobClient.getMessageContent(message.id);
+const chunks = [];
+for await (const chunk of stream) {
+  chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+}
+const imageBuffer = Buffer.concat(chunks);
 
     const title = `圖片附件 ${new Date().toLocaleDateString("zh-TW", { timeZone: "Asia/Taipei" })}`;
     const page = await createTaskPage(title, null);
