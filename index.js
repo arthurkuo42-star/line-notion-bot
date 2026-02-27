@@ -1,7 +1,6 @@
 require("dotenv").config();
 const express = require("express");
 const line = require("@line/bot-sdk");
-const axios = require("axios");
 const { parseTaskFromMessage } = require("./claude");
 const { createTaskPage, appendImageToPage } = require("./notion");
 
@@ -43,34 +42,54 @@ async function handleEvent(event) {
   const replyToken = event.replyToken;
   const message = event.message;
 
+  // ── 文字訊息 ──────────────────────────────────────
   if (message.type === "text") {
     const userText = message.text;
 
-    const { title, due_date } = await parseTaskFromMessage(userText);
+    const result = await parseTaskFromMessage(userText);
 
-    const page = await createTaskPage(title, due_date);
+    if (result.is_task) {
+      // 待辦事項：解析標題和截止日期
+      const { title, due_date } = result;
+      const page = await createTaskPage(title, due_date);
 
-    const dueDateStr = due_date
-      ? `📅 截止：${due_date}`
-      : "📅 截止日期：未設定";
+      const dueDateStr = due_date
+        ? `📅 截止：${due_date}`
+        : "📅 截止日期：未設定";
 
-    await lineClient.replyMessage({
-      replyToken,
-      messages: [
-        {
-          type: "text",
-          text: `✅ 待辦已新增！\n\n📝 ${title}\n${dueDateStr}\n\n🔗 ${page.url}`,
-        },
-      ],
-    });
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [
+          {
+            type: "text",
+            text: `✅ 待辦已新增！\n\n📝 ${title}\n${dueDateStr}\n\n🔗 ${page.url}`,
+          },
+        ],
+      });
+
+    } else {
+      // 備忘筆記：直接存成 Notion 頁面
+      const title = `備忘 ${new Date().toLocaleDateString("zh-TW", { timeZone: "Asia/Taipei" })}`;
+      const page = await createTaskPage(title, null, userText);
+
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [
+          {
+            type: "text",
+            text: `📓 備忘已儲存至 Notion！\n\n📝 ${title}\n\n🔗 ${page.url}`,
+          },
+        ],
+      });
+    }
   }
 
+  // ── 圖片訊息 ──────────────────────────────────────
   if (message.type === "image") {
     const response = await blobClient.getMessageContent(message.id);
     const arrayBuffer = await response.arrayBuffer();
     const imageBuffer = Buffer.from(arrayBuffer);
 
-    
     const title = `圖片附件 ${new Date().toLocaleDateString("zh-TW", { timeZone: "Asia/Taipei" })}`;
     const page = await createTaskPage(title, null);
 

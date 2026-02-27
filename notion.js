@@ -3,7 +3,7 @@ const axios = require("axios");
 
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
-async function createTaskPage(title, dueDate) {
+async function createTaskPage(title, dueDate, content = null) {
   const properties = {
     Task: {
       title: [{ text: { content: title } }],
@@ -23,6 +23,18 @@ async function createTaskPage(title, dueDate) {
 
   if (process.env.NOTION_TEMPLATE_ID) {
     createParams.template = { id: process.env.NOTION_TEMPLATE_ID };
+  }
+
+  // 若有備忘文字，加入頁面內容
+  if (content) {
+    createParams.children = [
+      {
+        type: "paragraph",
+        paragraph: {
+          rich_text: [{ type: "text", text: { content } }],
+        },
+      },
+    ];
   }
 
   const page = await notion.pages.create(createParams);
