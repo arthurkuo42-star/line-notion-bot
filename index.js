@@ -16,6 +16,10 @@ const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 });
 
+const blobClient = new line.messagingApi.MessagingApiBlobClient({
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+});
+
 app.post(
   "/webhook",
   line.middleware(lineConfig),
@@ -62,7 +66,7 @@ async function handleEvent(event) {
   }
 
   if (message.type === "image") {
-    const response = await lineClient.getMessageContent(message.id);
+    const response = await blobClient.getMessageContent(message.id);
     const arrayBuffer = await response.arrayBuffer();
     const imageBuffer = Buffer.from(arrayBuffer);
 
