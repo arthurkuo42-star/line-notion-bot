@@ -36,9 +36,11 @@ async function parseTaskFromMessage(message) {
     ],
   });
 
-  const text = response.content[0].text.trim();
-  const json = JSON.parse(text);
-  return json;
+const text = response.content[0].text.trim();
+// 移除 Claude 可能回傳的 markdown 標記
+const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+const json = JSON.parse(cleaned);
+return json;
 }
 
 module.exports = { parseTaskFromMessage };
