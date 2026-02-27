@@ -65,6 +65,7 @@ async function handleEvent(event) {
     const response = await lineClient.getMessageContent(message.id);
     const arrayBuffer = await response.arrayBuffer();
     const imageBuffer = Buffer.from(arrayBuffer);
+
     
     const title = `圖片附件 ${new Date().toLocaleDateString("zh-TW", { timeZone: "Asia/Taipei" })}`;
     const page = await createTaskPage(title, null);
