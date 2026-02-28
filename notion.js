@@ -41,14 +41,14 @@ async function createTaskPage(title, dueDate, content = null) {
   return page;
 }
 
-async function appendImageToPage(pageId, imageBuffer, mimeType) {
+async function appendFileToPage(pageId, fileBuffer, mimeType, fileName) {
   const headers = {
     Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
     "Notion-Version": "2022-06-28",
     "Content-Type": "application/json",
   };
 
-  // Step 1：建立 file upload 物件（注意是底線 file_uploads）
+  // Step 1：建立 file upload 物件
   const createResponse = await axios.post(
     "https://api.notion.com/v1/file_uploads",
     {},
@@ -57,10 +57,10 @@ async function appendImageToPage(pageId, imageBuffer, mimeType) {
 
   const { id: fileUploadId, upload_url } = createResponse.data;
 
-  // Step 2：用 multipart/form-data 上傳圖片內容
+  // Step 2：用 multipart/form-data 上傳檔案內容
   const form = new FormData();
-  form.append("file", imageBuffer, {
-    filename: `image_${Date.now()}.jpg`,
+  form.append("file", fileBuffer, {
+    filename: fileName,
     contentType: mimeType,
   });
 
@@ -72,13 +72,18 @@ async function appendImageToPage(pageId, imageBuffer, mimeType) {
     },
   });
 
-  // Step 3：將圖片附加到 Notion 頁面
+  // Step 3：依照 mimeType 決定 block 類型
+  const isImage = mimeType.startsWith("image/");
+  const isPDF = mimeType === "application/pdf";
+
+  const blockType = isImage ? "image" : isPDF ? "pdf" : "file";
+
   await notion.blocks.children.append({
     block_id: pageId,
     children: [
       {
-        type: "image",
-        image: {
+        type: blockType,
+        [blockType]: {
           type: "file_upload",
           file_upload: { id: fileUploadId },
         },
@@ -87,4 +92,4 @@ async function appendImageToPage(pageId, imageBuffer, mimeType) {
   });
 }
 
-module.exports = { createTaskPage, appendImageToPage };
+module.exports = { createTaskPage, appendFileToPage };
