@@ -12,6 +12,7 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "express": "^4.18.2",
     "dotenv": "^16.3.1",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "form-data": "^4.0.0"
   }
 }

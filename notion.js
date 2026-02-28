@@ -1,5 +1,6 @@
 const { Client } = require("@notionhq/client");
 const axios = require("axios");
+const FormData = require("form-data");
 
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
 
@@ -25,7 +26,6 @@ async function createTaskPage(title, dueDate, content = null) {
     createParams.template = { id: process.env.NOTION_TEMPLATE_ID };
   }
 
-  // 若有備忘文字，加入頁面內容
   if (content) {
     createParams.children = [
       {
@@ -42,24 +42,37 @@ async function createTaskPage(title, dueDate, content = null) {
 }
 
 async function appendImageToPage(pageId, imageBuffer, mimeType) {
-  const uploadResponse = await axios.post(
-    "https://api.notion.com/v1/file-uploads",
-    { name: `image_${Date.now()}.jpg`, content_type: mimeType },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
-      },
-    }
+  const headers = {
+    Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
+    "Notion-Version": "2022-06-28",
+    "Content-Type": "application/json",
+  };
+
+  // Step 1：建立 file upload 物件（注意是底線 file_uploads）
+  const createResponse = await axios.post(
+    "https://api.notion.com/v1/file_uploads",
+    {},
+    { headers }
   );
 
-  const { upload_url, id: fileUploadId } = uploadResponse.data;
+  const { id: fileUploadId, upload_url } = createResponse.data;
 
-  await axios.put(upload_url, imageBuffer, {
-    headers: { "Content-Type": mimeType },
+  // Step 2：用 multipart/form-data 上傳圖片內容
+  const form = new FormData();
+  form.append("file", imageBuffer, {
+    filename: `image_${Date.now()}.jpg`,
+    contentType: mimeType,
   });
 
+  await axios.post(upload_url, form, {
+    headers: {
+      Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
+      "Notion-Version": "2022-06-28",
+      ...form.getHeaders(),
+    },
+  });
+
+  // Step 3：將圖片附加到 Notion 頁面
   await notion.blocks.children.append({
     block_id: pageId,
     children: [
