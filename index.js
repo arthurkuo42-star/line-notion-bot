@@ -20,12 +20,10 @@ const blobClient = new line.messagingApi.MessagingApiBlobClient({
 });
 
 // ── 狀態管理 ──────────────────────────────────────
-// 緩衝區：收集 7 秒內的訊息
-const messageBuffer = new Map(); // userId -> { messages: [], timer }
-// 等待決策：等待使用者回覆合併或分開
-const pendingDecision = new Map(); // userId -> { messages: [] }
+const messageBuffer = new Map();
+const pendingDecision = new Map();
 
-const BUFFER_WINDOW = 7000; // 等待 7 秒
+const BUFFER_WINDOW = 7000;
 
 // ── Webhook ────────────────────────────────────────
 app.post(
@@ -54,20 +52,38 @@ async function handleEvent(event) {
   if (message.type === "text") {
     const text = message.text.trim();
 
-    if (pendingDecision.has(userId)) {
+    if (text === "合併" || text === "1" || text === "分開" || text === "2") {
+      // 找不到待處理狀態（伺服器重啟或逾時）
+      if (!pendingDecision.has(userId)) {
+        await lineClient.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text: "⚠️ 操作已逾時或伺服器重啟，請重新傳送內容後再選擇合併或分開。",
+            },
+          ],
+        });
+        return;
+      }
+
       if (text === "合併" || text === "1") {
         const messages = pendingDecision.get(userId);
         pendingDecision.delete(userId);
         await processMerged(userId, messages);
         return;
       }
+
       if (text === "分開" || text === "2") {
         const messages = pendingDecision.get(userId);
         pendingDecision.delete(userId);
         await processSeparate(userId, messages);
         return;
       }
-      // 不是合併/分開，清除等待狀態，繼續正常處理
+    }
+
+    // 有 pendingDecision 但輸入不是合併/分開，清除等待狀態繼續正常處理
+    if (pendingDecision.has(userId)) {
       pendingDecision.delete(userId);
     }
   }
@@ -79,16 +95,9 @@ async function handleEvent(event) {
   addToBuffer(userId, bufferedMessage);
 }
 
-// 下載訊息內容並整理成統一格式
 async function downloadMessage(message) {
-  const today = getTodayISO();
-  const todayDisplay = getTodayDisplay();
-
   if (message.type === "text") {
-    return {
-      type: "text",
-      content: message.text,
-    };
+    return { type: "text", content: message.text };
   }
 
   if (message.type === "image") {
@@ -123,7 +132,6 @@ async function downloadMessage(message) {
   return null;
 }
 
-// 加入緩衝區並設定計時器
 function addToBuffer(userId, message) {
   if (!messageBuffer.has(userId)) {
     messageBuffer.set(userId, { messages: [], timer: null });
@@ -132,12 +140,10 @@ function addToBuffer(userId, message) {
   const buffer = messageBuffer.get(userId);
   buffer.messages.push(message);
 
-  // 重設計時器
   if (buffer.timer) clearTimeout(buffer.timer);
   buffer.timer = setTimeout(() => flushBuffer(userId), BUFFER_WINDOW);
 }
 
-// 計時器到期，處理緩衝區
 async function flushBuffer(userId) {
   if (!messageBuffer.has(userId)) return;
 
@@ -146,13 +152,11 @@ async function flushBuffer(userId) {
 
   if (messages.length === 0) return;
 
-  // 只有一則訊息，直接處理
   if (messages.length === 1) {
     await processSeparate(userId, messages);
     return;
   }
 
-  // 多則訊息，詢問使用者
   pendingDecision.set(userId, messages);
 
   await lineClient.pushMessage({
@@ -166,26 +170,22 @@ async function flushBuffer(userId) {
   });
 }
 
-// 合併處理：所有內容放進同一個頁面
 async function processMerged(userId, messages) {
   const today = getTodayISO();
   const todayDisplay = getTodayDisplay();
 
-  // 用第一則文字訊息當標題，或預設標題
   let title = `合併內容 ${todayDisplay}`;
   let textContent = "";
 
   for (const msg of messages) {
     if (msg.type === "text") {
-      if (!textContent) title = msg.content.slice(0, 30); // 第一則文字當標題
+      if (!textContent) title = msg.content.slice(0, 30);
       textContent += (textContent ? "\n\n" : "") + msg.content;
     }
   }
 
-  // 建立頁面
   const page = await createTaskPage(title, today, textContent || null);
 
-  // 附加圖片和檔案
   for (const msg of messages) {
     if (msg.type === "image" || msg.type === "file") {
       await appendFileToPage(page.id, msg.buffer, msg.mimeType, msg.fileName);
@@ -203,7 +203,6 @@ async function processMerged(userId, messages) {
   });
 }
 
-// 分開處理：每則訊息各自建立頁面
 async function processSeparate(userId, messages) {
   const today = getTodayISO();
   const todayDisplay = getTodayDisplay();
@@ -216,11 +215,11 @@ async function processSeparate(userId, messages) {
       if (result.is_task) {
         const page = await createTaskPage(result.title, result.due_date);
         const dueDateStr = result.due_date ? `📅 截止：${result.due_date}` : "📅 截止日期：未設定";
-        results.push(`✅ ${result.title}\n${dueDateStr}`);
+        results.push(`✅ ${result.title}\n${dueDateStr}\n🔗 ${page.url}`);
       } else {
         const title = `備忘 ${todayDisplay}`;
         const page = await createTaskPage(title, today, msg.content);
-        results.push(`📓 ${title}`);
+        results.push(`📓 ${title}\n🔗 ${page.url}`);
       }
     }
 
@@ -228,14 +227,14 @@ async function processSeparate(userId, messages) {
       const title = `圖片附件 ${todayDisplay}`;
       const page = await createTaskPage(title, today);
       await appendFileToPage(page.id, msg.buffer, msg.mimeType, msg.fileName);
-      results.push(`🖼️ ${title}`);
+      results.push(`🖼️ ${title}\n🔗 ${page.url}`);
     }
 
     if (msg.type === "file") {
       const title = `${msg.fileName} ${todayDisplay}`;
       const page = await createTaskPage(title, today);
       await appendFileToPage(page.id, msg.buffer, msg.mimeType, msg.fileName);
-      results.push(`📎 ${title}`);
+      results.push(`📎 ${title}\n🔗 ${page.url}`);
     }
   }
 
@@ -251,7 +250,6 @@ async function processSeparate(userId, messages) {
   });
 }
 
-// 工具函數
 function getTodayISO() {
   return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" });
 }
