@@ -27,14 +27,17 @@ async function createTaskPage(title, dueDate, content = null) {
   }
 
   if (content) {
-    createParams.children = [
-      {
-        type: "paragraph",
-        paragraph: {
-          rich_text: [{ type: "text", text: { content } }],
-        },
+    const CHUNK_SIZE = 2000;
+    const chunks = [];
+    for (let i = 0; i < content.length; i += CHUNK_SIZE) {
+      chunks.push(content.slice(i, i + CHUNK_SIZE));
+    }
+    createParams.children = chunks.map((chunk) => ({
+      type: "paragraph",
+      paragraph: {
+        rich_text: [{ type: "text", text: { content: chunk } }],
       },
-    ];
+    }));
   }
 
   const page = await notion.pages.create(createParams);
