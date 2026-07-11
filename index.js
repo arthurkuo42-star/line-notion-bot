@@ -1,8 +1,19 @@
 require("dotenv").config();
 const express = require("express");
 const line = require("@line/bot-sdk");
-const { parseTaskFromMessage } = require("./claude");
-const { createTaskPage, appendFileToPage } = require("./notion");
+const {
+  parseTaskFromMessage,
+  parseInvoiceFromFile,
+  parseExpenseFromText,
+} = require("./claude");
+const {
+  createTaskPage,
+  createExpensePage,
+  updateClaimStatus,
+  updatePaidStatus,
+  convertExpenseToNote,
+  appendFileToPage,
+} = require("./notion");
 
 const app = express();
 
@@ -26,25 +37,23 @@ const pendingDecision = new Map();
 const BUFFER_WINDOW = 7000;
 
 // ── Webhook ────────────────────────────────────────
-app.post(
-  "/webhook",
-  line.middleware(lineConfig),
-  async (req, res) => {
-    res.sendStatus(200);
-    const events = req.body.events;
-    for (const event of events) {
-      try {
+app.post("/webhook", line.middleware(lineConfig), async (req, res) => {
+  res.sendStatus(200);
+  const events = req.body.events;
+  for (const event of events) {
+    try {
+      if (event.type === "postback") {
+        await handlePostback(event);
+      } else if (event.type === "message") {
         await handleEvent(event);
-      } catch (err) {
-        console.error("處理事件錯誤：", err);
       }
+    } catch (err) {
+      console.error("處理事件錯誤：", err);
     }
   }
-);
+});
 
 async function handleEvent(event) {
-  if (event.type !== "message") return;
-
   const userId = event.source.userId;
   const message = event.message;
 
@@ -53,7 +62,6 @@ async function handleEvent(event) {
     const text = message.text.trim();
 
     if (text === "合併" || text === "1" || text === "分開" || text === "2") {
-      // 找不到待處理狀態（伺服器重啟或逾時）
       if (!pendingDecision.has(userId)) {
         await lineClient.replyMessage({
           replyToken: event.replyToken,
@@ -67,22 +75,22 @@ async function handleEvent(event) {
         return;
       }
 
+      const messages = pendingDecision.get(userId);
+      pendingDecision.delete(userId);
       if (text === "合併" || text === "1") {
-        const messages = pendingDecision.get(userId);
-        pendingDecision.delete(userId);
         await processMerged(userId, messages);
-        return;
-      }
-
-      if (text === "分開" || text === "2") {
-        const messages = pendingDecision.get(userId);
-        pendingDecision.delete(userId);
+      } else {
         await processSeparate(userId, messages);
-        return;
       }
+      return;
     }
 
-    // 有 pendingDecision 但輸入不是合併/分開，清除等待狀態繼續正常處理
+    // 手動記帳指令：「記帳 午餐 150」
+    if (text.startsWith("記帳")) {
+      await handleTextExpense(userId, text.replace(/^記帳[:：\s]*/, ""));
+      return;
+    }
+
     if (pendingDecision.has(userId)) {
       pendingDecision.delete(userId);
     }
@@ -101,35 +109,35 @@ async function downloadMessage(message) {
   }
 
   if (message.type === "image") {
-    const stream = await blobClient.getMessageContent(message.id);
-    const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-    }
+    const buffer = await collectStream(await blobClient.getMessageContent(message.id));
     return {
       type: "image",
-      buffer: Buffer.concat(chunks),
+      buffer,
       mimeType: "image/jpeg",
       fileName: `image_${Date.now()}.jpg`,
     };
   }
 
   if (message.type === "file") {
-    const stream = await blobClient.getMessageContent(message.id);
-    const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-    }
+    const buffer = await collectStream(await blobClient.getMessageContent(message.id));
     const fileName = message.fileName || `檔案_${Date.now()}`;
     return {
       type: "file",
-      buffer: Buffer.concat(chunks),
+      buffer,
       mimeType: getMimeType(fileName),
       fileName,
     };
   }
 
   return null;
+}
+
+async function collectStream(stream) {
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 function addToBuffer(userId, message) {
@@ -170,6 +178,7 @@ async function flushBuffer(userId) {
   });
 }
 
+// 合併 → 一律存進 note database（使用者明確要求彙整成一頁筆記）
 async function processMerged(userId, messages) {
   const today = getTodayISO();
   const todayDisplay = getTodayDisplay();
@@ -214,7 +223,9 @@ async function processSeparate(userId, messages) {
 
       if (result.is_task) {
         const page = await createTaskPage(result.title, result.due_date);
-        const dueDateStr = result.due_date ? `📅 截止：${result.due_date}` : "📅 截止日期：未設定";
+        const dueDateStr = result.due_date
+          ? `📅 截止：${result.due_date}`
+          : "📅 截止日期：未設定";
         results.push(`✅ ${result.title}\n${dueDateStr}\n🔗 ${page.url}`);
       } else {
         const title = `備忘 ${todayDisplay}`;
@@ -223,33 +234,217 @@ async function processSeparate(userId, messages) {
       }
     }
 
-    if (msg.type === "image") {
-      const title = `圖片附件 ${todayDisplay}`;
-      const page = await createTaskPage(title, today);
-      await appendFileToPage(page.id, msg.buffer, msg.mimeType, msg.fileName);
-      results.push(`🖼️ ${title}\n🔗 ${page.url}`);
-    }
+    // 圖片/檔案 → 先辨識是否為發票/繳款單
+    if (msg.type === "image" || msg.type === "file") {
+      const handled = await tryHandleAsExpense(userId, msg);
+      if (handled) continue; // 已送出記帳卡片，不再列入 note 結果
 
-    if (msg.type === "file") {
-      const title = `${msg.fileName} ${todayDisplay}`;
+      // 非消費憑證 → 沿用原本存進 note database 的行為
+      const isImage = msg.type === "image";
+      const title = isImage
+        ? `圖片附件 ${todayDisplay}`
+        : `${msg.fileName} ${todayDisplay}`;
       const page = await createTaskPage(title, today);
       await appendFileToPage(page.id, msg.buffer, msg.mimeType, msg.fileName);
-      results.push(`📎 ${title}\n🔗 ${page.url}`);
+      results.push(`${isImage ? "🖼️" : "📎"} ${title}\n🔗 ${page.url}`);
     }
   }
 
-  const summary = results.join("\n\n");
+  if (results.length === 0) return;
+
   await lineClient.pushMessage({
     to: userId,
     messages: [
       {
         type: "text",
-        text: `✅ 已分開儲存至 Notion！\n\n${summary}`,
+        text: `✅ 已分開儲存至 Notion！\n\n${results.join("\n\n")}`,
       },
     ],
   });
 }
 
+// 嘗試把圖片/PDF 當成發票/繳款單處理。
+// 回傳 true = 已處理並送出記帳卡片；false = 不是消費憑證。
+async function tryHandleAsExpense(userId, msg) {
+  let parsed;
+  try {
+    parsed = await parseInvoiceFromFile(msg.buffer, msg.mimeType);
+  } catch (err) {
+    console.error("發票辨識失敗，改存 note：", err);
+    return false;
+  }
+
+  if (!parsed || !parsed.is_expense) return false;
+
+  const data = {
+    title: parsed.title || "未命名支出",
+    amount: parsed.amount != null ? Number(parsed.amount) : null,
+    category: parsed.category || null,
+    date: parsed.date || getTodayISO(),
+    dueDate: parsed.due_date || null,
+    note: parsed.note || null,
+  };
+
+  const page = await createExpensePage(data);
+
+  // 把原始照片/PDF 附進該記帳頁面
+  await appendFileToPage(page.id, msg.buffer, msg.mimeType, msg.fileName);
+
+  await lineClient.pushMessage({
+    to: userId,
+    messages: [buildExpenseFlex(page, data)],
+  });
+  return true;
+}
+
+// 文字記帳指令
+async function handleTextExpense(userId, body) {
+  if (!body.trim()) {
+    await lineClient.pushMessage({
+      to: userId,
+      messages: [{ type: "text", text: "請在「記帳」後面接內容，例如：記帳 午餐 150" }],
+    });
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = await parseExpenseFromText(body);
+  } catch (err) {
+    console.error("文字記帳解析失敗：", err);
+    await lineClient.pushMessage({
+      to: userId,
+      messages: [{ type: "text", text: "⚠️ 記帳解析失敗，請再試一次。" }],
+    });
+    return;
+  }
+
+  const data = {
+    title: parsed.title || body.slice(0, 20),
+    amount: parsed.amount != null ? Number(parsed.amount) : null,
+    category: parsed.category || null,
+    date: parsed.date || getTodayISO(),
+    dueDate: null,
+    note: parsed.note || null,
+  };
+
+  const page = await createExpensePage(data);
+
+  await lineClient.pushMessage({
+    to: userId,
+    messages: [buildExpenseFlex(page, data)],
+  });
+}
+
+// ── Postback：按鈕改狀態 ─────────────────────────────
+async function handlePostback(event) {
+  const params = new URLSearchParams(event.postback.data);
+  const action = params.get("action");
+  const pageId = params.get("page");
+  if (!action || !pageId) return;
+
+  let replyText = "";
+  try {
+    if (action === "claim_done") {
+      await updateClaimStatus(pageId, "已請款");
+      replyText = "✅ 已標記為「已請款」";
+    } else if (action === "claim_none") {
+      await updateClaimStatus(pageId, "不需請款");
+      replyText = "✅ 已標記為「不需請款」";
+    } else if (action === "paid") {
+      await updatePaidStatus(pageId, true);
+      replyText = "✅ 已標記為「已繳費／已入帳」";
+    } else if (action === "not_expense") {
+      await convertExpenseToNote(pageId, "改存備忘");
+      replyText = "↩️ 已從記帳移除，改存為備忘筆記。";
+    } else {
+      return;
+    }
+  } catch (err) {
+    console.error("更新狀態失敗：", err);
+    replyText = "⚠️ 更新失敗，請稍後再試或直接到 Notion 修改。";
+  }
+
+  await lineClient.replyMessage({
+    replyToken: event.replyToken,
+    messages: [{ type: "text", text: replyText }],
+  });
+}
+
+// ── Flex 記帳確認卡片 ────────────────────────────────
+function buildExpenseFlex(page, data) {
+  const amountStr =
+    data.amount != null ? `NT$ ${data.amount.toLocaleString("en-US")}` : "金額未辨識";
+
+  const rows = [];
+  const addRow = (label, value) => {
+    if (!value) return;
+    rows.push({
+      type: "box",
+      layout: "baseline",
+      spacing: "sm",
+      contents: [
+        { type: "text", text: label, color: "#999999", size: "sm", flex: 2 },
+        { type: "text", text: String(value), size: "sm", flex: 5, wrap: true },
+      ],
+    });
+  };
+  addRow("分類", data.category);
+  addRow("日期", data.date);
+  addRow("繳款截止", data.dueDate);
+  addRow("備註", data.note);
+
+  const data0 = `page=${page.id}`;
+
+  return {
+    type: "flex",
+    altText: `已記帳：${data.title} ${amountStr}`,
+    contents: {
+      type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "md",
+        contents: [
+          { type: "text", text: "📥 已記帳", weight: "bold", color: "#1DB446", size: "sm" },
+          { type: "text", text: data.title, weight: "bold", size: "lg", wrap: true },
+          { type: "text", text: amountStr, weight: "bold", size: "xl", color: "#333333" },
+          { type: "separator", margin: "md" },
+          { type: "box", layout: "vertical", margin: "md", spacing: "sm", contents: rows },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          {
+            type: "box",
+            layout: "horizontal",
+            spacing: "sm",
+            contents: [
+              flexButton("不需請款", `action=claim_none&${data0}`, "secondary"),
+              flexButton("已請款", `action=claim_done&${data0}`, "primary"),
+            ],
+          },
+          flexButton("💰 已繳費／已入帳", `action=paid&${data0}`, "primary"),
+          flexButton("❌ 這不是記帳", `action=not_expense&${data0}`, "link"),
+        ],
+      },
+    },
+  };
+}
+
+function flexButton(label, data, style) {
+  return {
+    type: "button",
+    style,
+    height: "sm",
+    action: { type: "postback", label, data, displayText: label },
+  };
+}
+
+// ── 工具 ─────────────────────────────────────────────
 function getTodayISO() {
   return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Taipei" });
 }
