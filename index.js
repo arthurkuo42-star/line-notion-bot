@@ -6,6 +6,7 @@ const {
   parseInvoiceFromFile,
   parseExpenseFromText,
 } = require("./claude");
+const { registerArchiveBot } = require("./archive");
 const {
   createTaskPage,
   createExpensePage,
@@ -475,6 +476,9 @@ function getMimeType(fileName) {
   };
   return mimeMap[ext] || "application/octet-stream";
 }
+
+// 泓品收發：LINE 檔案自動歸檔（第二個 channel，環境變數未設定時不啟動）
+registerArchiveBot(app);
 
 app.get("/", (req, res) => res.send("LINE Notion Bot 運作中 ✅"));
 
