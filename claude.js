@@ -25,7 +25,14 @@ function extractJson(text) {
     .replace(/```json\n?/g, "")
     .replace(/```\n?/g, "")
     .trim();
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch (_) {
+    // 模型偶爾夾帶說明文字，退而求其次抓第一個 {...} 區塊
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error("無法從回應解析 JSON：" + cleaned.slice(0, 200));
+  }
 }
 
 // ── 文字訊息：判斷待辦/備忘（原有功能）─────────────────
@@ -112,7 +119,7 @@ async function parseInvoiceFromFile(buffer, mimeType) {
 
   const response = await client.messages.create({
     model: MODEL,
-    max_tokens: 512,
+    max_tokens: 1024,
     messages: [
       {
         role: "user",
@@ -121,7 +128,10 @@ async function parseInvoiceFromFile(buffer, mimeType) {
     ],
   });
 
-  return extractJson(response.content[0].text.trim());
+  const textBlock = response.content.find((b) => b.type === "text");
+  const raw = (textBlock ? textBlock.text : "").trim();
+  console.log("發票辨識原始回應：", raw.slice(0, 500));
+  return extractJson(raw);
 }
 
 // ── 文字指令記帳：「記帳 午餐 150」之類 ────────────────

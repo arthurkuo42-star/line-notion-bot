@@ -254,17 +254,18 @@ async function processSeparate(userId, messages) {
 
     // 圖片/檔案 → 先辨識是否為發票/繳款單
     if (msg.type === "image" || msg.type === "file") {
-      const handled = await tryHandleAsExpense(userId, msg);
-      if (handled) continue; // 已送出記帳卡片，不再列入 note 結果
+      const outcome = await tryHandleAsExpense(userId, msg);
+      if (outcome.handled) continue; // 已送出記帳卡片，不再列入 note 結果
 
-      // 非消費憑證 → 沿用原本存進 note database 的行為
+      // 非消費憑證（或記帳流程失敗）→ 存進 note database，並附上退回原因供診斷
       const isImage = msg.type === "image";
       const title = isImage
         ? `圖片附件 ${todayDisplay}`
         : `${msg.fileName} ${todayDisplay}`;
       const page = await createTaskPage(title, today);
       await appendFileToPage(page.id, msg.buffer, msg.mimeType, msg.fileName);
-      results.push(`${isImage ? "🖼️" : "📎"} ${title}\n🔗 ${page.url}`);
+      const reasonLine = outcome.reason ? `\nℹ️ ${outcome.reason}` : "";
+      results.push(`${isImage ? "🖼️" : "📎"} ${title}${reasonLine}\n🔗 ${page.url}`);
     }
   }
 
@@ -282,17 +283,20 @@ async function processSeparate(userId, messages) {
 }
 
 // 嘗試把圖片/PDF 當成發票/繳款單處理。
-// 回傳 true = 已處理並送出記帳卡片；false = 不是消費憑證。
+// 回傳 { handled: true } = 已送出記帳卡片；
+//     { handled: false, reason } = 未當成記帳（reason 供診斷用）。
 async function tryHandleAsExpense(userId, msg) {
   let parsed;
   try {
     parsed = await parseInvoiceFromFile(msg.buffer, msg.mimeType);
   } catch (err) {
     console.error("發票辨識失敗，改存 note：", err);
-    return false;
+    return { handled: false, reason: `辨識出錯（${err.message || err}）` };
   }
 
-  if (!parsed || !parsed.is_expense) return false;
+  if (!parsed || !parsed.is_expense) {
+    return { handled: false, reason: "AI 判斷這不是消費憑證" };
+  }
 
   const data = {
     title: parsed.title || "未命名支出",
@@ -309,7 +313,8 @@ async function tryHandleAsExpense(userId, msg) {
     page = await createExpensePage(data);
   } catch (err) {
     console.error("建立記帳頁面失敗，改存 note：", err?.body || err);
-    return false;
+    const detail = err?.body || err?.message || String(err);
+    return { handled: false, reason: `寫入記帳庫失敗（${String(detail).slice(0, 120)}）` };
   }
 
   // 附上原始照片/PDF。附檔失敗不影響已建立的記帳頁，僅記錄。
@@ -323,7 +328,7 @@ async function tryHandleAsExpense(userId, msg) {
     to: userId,
     messages: [buildExpenseFlex(page, data)],
   });
-  return true;
+  return { handled: true };
 }
 
 // 文字記帳指令
