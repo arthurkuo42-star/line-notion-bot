@@ -7,6 +7,18 @@ const notion = new Client({ auth: process.env.NOTION_TOKEN });
 const NOTE_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 const EXPENSE_DATABASE_ID = process.env.NOTION_EXPENSE_DATABASE_ID;
 
+// 記帳資料庫既有選項（防呆：AI 給出清單外的值就略過該欄，避免 Notion select 驗證直接報錯）
+const VALID_TYPES = ["支出", "收入", "轉帳", "投資"];
+const VALID_CATEGORIES = [
+  "房貸", "青創貸款", "汽車貸款", "信用卡帳單", "投資",
+  "生活", "保險", "交通", "稅費", "BNI",
+];
+const VALID_ACCOUNTS = [
+  "房屋貸款", "房屋貸款(第二筆)", "青創貸款(台銀-1)", "青創貸款(台銀-2)",
+  "汽車貸款", "信用卡-台新", "信用卡-國泰", "信用卡-中信", "信用卡-玉山",
+  "信用卡-華南", "信用卡-富邦", "現金/活存", "投資帳戶", "信用卡-永豐",
+];
+
 // ── note database（原有待辦/備忘）────────────────────
 async function createTaskPage(title, dueDate, content = null) {
   const properties = {
@@ -55,12 +67,14 @@ async function createExpensePage(data) {
     note,
   } = data;
 
+  const safeType = VALID_TYPES.includes(type) ? type : "支出";
+
   const properties = {
     名稱: {
       title: [{ text: { content: title || "未命名支出" } }],
     },
     類型: {
-      select: { name: type },
+      select: { name: safeType },
     },
     請款狀態: {
       status: { name: "未請款" },
@@ -73,10 +87,10 @@ async function createExpensePage(data) {
   if (typeof amount === "number" && !Number.isNaN(amount)) {
     properties["金額"] = { number: amount };
   }
-  if (category) {
+  if (category && VALID_CATEGORIES.includes(category)) {
     properties["分類"] = { select: { name: category } };
   }
-  if (account) {
+  if (account && VALID_ACCOUNTS.includes(account)) {
     properties["帳戶/負債"] = { select: { name: account } };
   }
   if (date) {

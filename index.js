@@ -49,7 +49,24 @@ app.post("/webhook", line.middleware(lineConfig), async (req, res) => {
         await handleEvent(event);
       }
     } catch (err) {
-      console.error("處理事件錯誤：", err);
+      console.error("處理事件錯誤：", err?.body || err);
+      // 不讓錯誤靜默：至少回報使用者一則失敗訊息
+      const uid = event?.source?.userId;
+      if (uid) {
+        try {
+          await lineClient.pushMessage({
+            to: uid,
+            messages: [
+              {
+                type: "text",
+                text: "⚠️ 剛才那筆處理時發生錯誤，沒有存進去。可以再傳一次，或改用文字「記帳 品項 金額」。",
+              },
+            ],
+          });
+        } catch (notifyErr) {
+          console.error("錯誤通知也失敗：", notifyErr?.body || notifyErr);
+        }
+      }
     }
   }
 });
@@ -286,10 +303,21 @@ async function tryHandleAsExpense(userId, msg) {
     note: parsed.note || null,
   };
 
-  const page = await createExpensePage(data);
+  // 建立記帳頁面。失敗（例如選項驗證）就退回 note 流程，讓使用者至少存到檔案 + 有回覆。
+  let page;
+  try {
+    page = await createExpensePage(data);
+  } catch (err) {
+    console.error("建立記帳頁面失敗，改存 note：", err?.body || err);
+    return false;
+  }
 
-  // 把原始照片/PDF 附進該記帳頁面
-  await appendFileToPage(page.id, msg.buffer, msg.mimeType, msg.fileName);
+  // 附上原始照片/PDF。附檔失敗不影響已建立的記帳頁，僅記錄。
+  try {
+    await appendFileToPage(page.id, msg.buffer, msg.mimeType, msg.fileName);
+  } catch (err) {
+    console.error("記帳頁附檔失敗（頁面已建立）：", err?.body || err);
+  }
 
   await lineClient.pushMessage({
     to: userId,
